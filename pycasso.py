@@ -6,9 +6,11 @@ import nrrd as nd # also known as pynrrd
 import nibabel as nib
 import argparse
 import logging
+from scipy.optimize import least_squares
 
 logging.basicConfig(level=logging.WARN, format="[%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger(os.path.basename(__file__))
+
 
 class DiffusionData:
     """Contains the various attributes of the input diffusion data"""
@@ -183,42 +185,84 @@ class DiffusionData:
             output.to_filename(filename)
 
 
-def estimate_tensor(s, q):
-    """computes DTI tensor using q values and the normalized fMRI signals"""
-    idx = np.where(s > 1e-4)[0] # get rid of extremely small diff weighted vols
-    s = s[idx]                  #
-    q = q[idx, :]               #
+def null(a, rtol=1e-5):
+    """
+    is an orthonormal basis for the null space of A obtained from the singular
+    value decomposition. That is, a.dot(n) has negligible elements,
+    np.shape(n, 2) is the nullity of a, and n.T.dot(n) = I.
+    """
+    u, s, v = np.linalg.svd(a)
+    rank = (s > rtol*s[0]).sum()
+    n = v[rank:].T.copy()
 
-    s = -np.log(s)
-    A = np.array([q[:, 0]**2,
-                  q[:, 1]**2,
-                  q[:, 2]**2,
-                  q[:, 0]*q[:, 1],
-                  q[:, 0]*q[:, 2],
-                  q[:, 1]*q[:, 2]]).T
+    return n
+
+
+def estimate_tensor(x, g):
+    """
+    computes DTI tensor using q values and the normalized dMRI signals.
+    details in: Introduction to diffusion tensor imaging mathematics: part III.
+    Tensor calculation, noise, simulations, and optimization. Peter B. Kingsley.
+    2005. Concepts in Magnetic Resonance Part A, Vol 28A(2)
+
+    x = input diffusion weightings for a voxel
+    g = normalized gradient components
+    """
+    idx = np.where(x > 1e-4)[0] # get rid of extremely small diff weighted vols
+    x = x[idx]                  #
+    g = g[idx, :]               #
+
+    # apparent diffusion coefficients (ADCs), eqn 8
+    x = -np.log(x)
+
+    # represents tensor [Dxx, Dyy, Dzz, Dxy, Dxz, Dyz], eqn 10
+    d = np.array([g[:, 0]**2,
+                  g[:, 1]**2,
+                  g[:, 2]**2,
+                  g[:, 0]*g[:, 1],
+                  g[:, 0]*g[:, 2],
+                  g[:, 1]*g[:, 2]]).T
 
     # TODO: DOUBLE CHECK THIS LINE
-    d = np.linalg.pinv(A.T.dot(A)).dot(A.T).dot(np.atleast_2d(s).T)
+    # calculate pseudoinverse of H, multiply with data s, eqn. 37
+    # collapses X gradient directions down to 9 numbers that represent cardinal
+    # directions x,y,z
+    d = np.linalg.pinv(d.T.dot(d)).dot(d.T).dot(np.atleast_2d(x).T)
     d = np.real(d)
+
+    # initial diffusion matrix
     D = np.array([[d[0], d[3], d[4]],
                   [d[3], d[1], d[5]],
                   [d[4], d[5], d[2]]])
 
-    # find the eigenvectors of d
-    import IPython; IPython.embed()
-
-    e, U = np.linalg.eig(D[:, :, 0])
+    # find the eigenvalues, eigenvectors of d
+    # NB: order of outputs from eig is flipped w.r.t. MATLAB
+    e, U = np.linalg.eig(D[:, :, 0]) # I have numpy matrix issues, hence the 0
     e[e < 5e-6] = 5e-6 # ensure all values are positive (clip near zero)
-    e = np.diag(e) # ensures off-diagnonal is zero
+    e = np.diag(e) # makes square with off-diagnonal of zero
+
+    # final pseudoinverse of H, eqn. 47
     D = U.dot(e).dot(U.T)
 
     return D
 
 
-def model_picaso(s, u, b):
+def model_bloch_to_rrey(x, u, b, v):
+    """TODO: get docstring from Lipeng"""
+    v_perp = null(v.T)
+    V = np.hstack((v, v_perp))
+    U2D  = V.dot(np.diag([x[0], x[1], x[1]])).dot(V.T)
+    diff = V.dot(np.diag([x[2], x[3], x[3]])).dot(V.T)
+    signal = np.sum(u.dot(U2D)*u, axis=1) +
+        (1-np.sum(u.dot(U2D)*u, axis=1)) * np.exp(-b*np.sum(u.dot(diff)*u, axis=1))
+
+    return signal
+
+
+def model_picaso(x, g, b):
     """
-    accepts s (normalized diffusion signal from one voxel),
-            u (gradient direction vectors), and
+    accepts x (normalized diffusion signal from one voxel),
+            g (gradient direction vectors), and
             b (a vector of b-values)
     returns ?
 
@@ -226,9 +270,14 @@ def model_picaso(s, u, b):
     as well as the mean diffusivity in the directions parallel and perpendicular
     to the fiber orientation. (U2_parallel, U2_perp, D_parallel, D_perp).
     """
-    q = np.tile(np.sqrt(b), (3, 1)).T * u # modulates gradients by sqrt of bval
-    T = estimate_tensor(s, q)
+    g = np.tile(np.sqrt(b), (3, 1)).T * g # modulates gradients by sqrt of bval
+    T = estimate_tensor(x, g)
+    U, S, V = np.linalg.svd(T)
+    u = U[:, 0] # first eig
 
+    fit = least_squares() ## lost -- where does @fun come from?
+
+    import IPython; IPython.embed()
 
 
 logger.setLevel(logging.DEBUG)
