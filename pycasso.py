@@ -7,6 +7,7 @@ import nibabel as nib
 import argparse
 import logging
 from scipy.optimize import least_squares
+from multiprocessing import Pool
 
 logging.basicConfig(level=logging.WARN, format="[%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger(os.path.basename(__file__))
@@ -247,19 +248,31 @@ def estimate_tensor(x, g):
     return D
 
 
-def model_bloch_to_rrey(x, u, b, v):
+def bloch_to_rrey_signal(x, g, b, u):
     """TODO: get docstring from Lipeng"""
-    v_perp = null(v.T)
-    V = np.hstack((v, v_perp))
-    U2D  = V.dot(np.diag([x[0], x[1], x[1]])).dot(V.T)
-    diff = V.dot(np.diag([x[2], x[3], x[3]])).dot(V.T)
-    signal = np.sum(u.dot(U2D)*u, axis=1) +
-        (1-np.sum(u.dot(U2D)*u, axis=1)) * np.exp(-b*np.sum(u.dot(diff)*u, axis=1))
+    u_perp = null(np.atleast_2d(u))
+    U = np.hstack((np.atleast_2d(u).T, u_perp))
+    U2D  = U.dot(np.diag([x[0], x[1], x[1]])).dot(U.T)
+    diff = U.dot(np.diag([x[2], x[3], x[3]])).dot(U.T)
+    signal = np.sum(g.dot(U2D)*g, axis=1) + (1-np.sum(g.dot(U2D)*g, axis=1)) * np.exp(-b*np.sum(g.dot(diff)*g, axis=1))
 
     return signal
 
 
-def model_picaso(x, g, b):
+def bloch_wrapper(x, x_subj, g, b, u):
+    """
+    designed to be fed to least_squares for nonlinear fit
+    returns error between fit estimate and real data
+    x:      x estimate for least_squares fitting
+    x_subj: the voxel's diffusion data
+    g:      the gradients for all directions (non-zero b's only)
+    b:      the b values for all directions (non-zero b's only)
+    u:      the first eigenvector from the single-tensor estimation
+    """
+    return(bloch_to_rrey_signal(x, g, b, u) - x_subj)
+
+
+def picaso(x, g, b):
     """
     accepts x (normalized diffusion signal from one voxel),
             g (gradient direction vectors), and
@@ -275,9 +288,22 @@ def model_picaso(x, g, b):
     U, S, V = np.linalg.svd(T)
     u = U[:, 0] # first eig
 
-    fit = least_squares() ## lost -- where does @fun come from?
+    # nonlinear lsq fit between initial paramaters and the actual diffusion data
+    X0 = np.array([0.1, 0.1, 0.5, 0.5]) # column vector
+    lb = np.array([0, 0, 0, 0])         #
+    ub = np.array([1, 1, 3, 3])         #
+    # check loss function -- currently using 'linear' but other methods that are
+    # robust to outliers might help here.
+    fit = least_squares(bloch_wrapper, X0, bounds=(lb, ub), args=(x, g, b, u))
+    f_coef = fit['x']
 
-    import IPython; IPython.embed()
+    u_perp = null(np.atleast_2d(u))
+    U = np.hstack((np.atleast_2d(u).T, u_perp))
+    U2 = U.dot(np.diag([f_coef[0]*f_coef[2], f_coef[1]*f_coef[3], f_coef[1]*f_coef[3]])).dot(U.T)
+    diff = U.dot(np.diag([f_coef[2], f_coef[3], f_coef[3]])).dot(U.T)
+    s_estimate = bloch_to_rrey_signal(f_coef, g, b, u)
+
+    return(U2, diff, f_coef, s_estimate)
 
 
 logger.setLevel(logging.DEBUG)
@@ -286,20 +312,27 @@ filename = '/archive/data/SPINS/pipelines/dtiprep/SPN01_CMH_0114_01/SPN01_CMH_01
 maskname =  '/archive/data/SPINS/pipelines/dtiprep/SPN01_CMH_0114_01/SPN01_CMH_0114_01_01_DTI60-1000_15_Ax-DTI-60plus5-20iso_QCed_B0_threshold_masked.nii.gz'
 
 # normalizes and clips input data by default
-diff = DiffusionData(filename, maskname)
+dmri = DiffusionData(filename, maskname)
 
 # initalize outputs
-disturb_per = np.zeros((diff.x*diff.y*diff.z, 1))
-disturb_par = np.zeros((diff.x*diff.y*diff.z, 1))
-diff_per = np.zeros((diff.x*diff.y*diff.z, 1))
-diff_par = np.zeros((diff.x*diff.y*diff.z, 1))
+disturb_per = np.zeros((dmri.x*dmri.y*dmri.z, 1))
+disturb_par = np.zeros((dmri.x*dmri.y*dmri.z, 1))
+diff_per = np.zeros((dmri.x*dmri.y*dmri.z, 1))
+diff_par = np.zeros((dmri.x*dmri.y*dmri.z, 1))
 
-idx = np.where(diff.mask == 1)[0]
+idx = np.where(dmri.mask == 1)[0]
+n_voxels = len(idx)
 
 # fit picaso model per voxel
-for i in idx:
-    diff_vox = diff.data[i, :]
-    a, b, coef = model_picaso(diff_vox, diff.gradients, diff.b)
+for i, voxel in enumerate(idx):
 
+    _, _, f_coef, _ = picaso(dmri.data[voxel, :], dmri.gradients, dmri.b)
 
+    disturb_per[voxel] = f_coef[1]*f_coef[3]
+    disturb_par[voxel] = f_coef[0]*f_coef[2]
+    diff_per[voxel] = f_coef[3]
+    diff_per[voxel] = f_coef[2]
+    logger.debug('fit {}/{} voxels'.format(i+1, n_voxels))
+
+import IPython; IPython.embed()
 
