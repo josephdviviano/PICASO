@@ -1,13 +1,16 @@
 #!/usr/bin/env python
 
 import os, sys
+import datetime
+import argparse
+import logging
+import warnings
 import numpy as np
 import nrrd as nd # also known as pynrrd
 import nibabel as nib
-import argparse
-import logging
 from scipy.optimize import least_squares
 from multiprocessing import Pool
+
 
 logging.basicConfig(level=logging.WARN, format="[%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger(os.path.basename(__file__))
@@ -143,8 +146,11 @@ class DiffusionData:
             self.gradients = self.gradients[~self.idx_b0, :]
             self.b = self.b[~self.idx_b0]
 
-            # normalize gradient direction volumes by b0 mean
-            self.data = self.data / np.atleast_2d(b0_mean).T
+            # stop annoying divide by zero warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=RuntimeWarning)
+                # normalize gradient direction volumes by b0 mean
+                self.data = self.data / np.atleast_2d(b0_mean).T
 
             # set all infs and nans to 0
             self.data[np.isinf(self.data)] = 0
@@ -173,7 +179,7 @@ class DiffusionData:
             self.clipped = True
 
 
-    def _write(self, data, filename):
+    def write(self, data, filename):
         if self.filetype == 'nifti':
             try:
                 data = np.reshape(data, (self.x, self.y, self.z, data.shape[1]))
@@ -272,8 +278,9 @@ def bloch_wrapper(x, x_subj, g, b, u):
     return(bloch_to_rrey_signal(x, g, b, u) - x_subj)
 
 
-def picaso(x, g, b):
+def picaso(args):
     """
+    arglist = [x, g, b]
     accepts x (normalized diffusion signal from one voxel),
             g (gradient direction vectors), and
             b (a vector of b-values)
@@ -283,6 +290,10 @@ def picaso(x, g, b):
     as well as the mean diffusivity in the directions parallel and perpendicular
     to the fiber orientation. (U2_parallel, U2_perp, D_parallel, D_perp).
     """
+    x = args[0]
+    g = args[1]
+    b = args[2]
+
     g = np.tile(np.sqrt(b), (3, 1)).T * g # modulates gradients by sqrt of bval
     T = estimate_tensor(x, g)
     U, S, V = np.linalg.svd(T)
@@ -306,33 +317,65 @@ def picaso(x, g, b):
     return(U2, diff, f_coef, s_estimate)
 
 
-logger.setLevel(logging.DEBUG)
+def main(filename, maskname, outputname):
 
-filename = '/archive/data/SPINS/pipelines/dtiprep/SPN01_CMH_0114_01/SPN01_CMH_0114_01_01_DTI60-1000_15_Ax-DTI-60plus5-20iso_QCed.nii.gz'
-maskname =  '/archive/data/SPINS/pipelines/dtiprep/SPN01_CMH_0114_01/SPN01_CMH_0114_01_01_DTI60-1000_15_Ax-DTI-60plus5-20iso_QCed_B0_threshold_masked.nii.gz'
+    logger.debug('loading {} and {}'.format(
+        os.path.basename(filename), os.path.basename(maskname)))
+    # normalizes and clips input data by default
+    dmri = DiffusionData(filename, maskname)
 
-# normalizes and clips input data by default
-dmri = DiffusionData(filename, maskname)
+    logger.debug('initializing output arrays')
+    disturb_per = np.zeros((dmri.x*dmri.y*dmri.z, 1))
+    disturb_par = np.zeros((dmri.x*dmri.y*dmri.z, 1))
+    diff_per = np.zeros((dmri.x*dmri.y*dmri.z, 1))
+    diff_par = np.zeros((dmri.x*dmri.y*dmri.z, 1))
 
-# initalize outputs
-disturb_per = np.zeros((dmri.x*dmri.y*dmri.z, 1))
-disturb_par = np.zeros((dmri.x*dmri.y*dmri.z, 1))
-diff_per = np.zeros((dmri.x*dmri.y*dmri.z, 1))
-diff_par = np.zeros((dmri.x*dmri.y*dmri.z, 1))
+    idx = np.where(dmri.mask == 1)[0]
+    n_voxels = len(idx)
 
-idx = np.where(dmri.mask == 1)[0]
-n_voxels = len(idx)
+    logger.debug('initializing parallel pool')
+    pool = Pool()
 
-# fit picaso model per voxel
-for i, voxel in enumerate(idx):
+    # gather all inputs for picaso
+    arglist = []
+    for i, voxel in enumerate(idx):
+        arglist.append([dmri.data[voxel, :], dmri.gradients, dmri.b])
 
-    _, _, f_coef, _ = picaso(dmri.data[voxel, :], dmri.gradients, dmri.b)
+    # run picaso across all available cores using map
+    try:
+        logger.debug('beginning picaso estimation on all voxels')
+        start = datetime.datetime.now()
+        #picaso_outputs = np.array(pool.map(picaso, arglist))
+        picaso_outputs = np.array(pool.map_async(picaso, arglist).get(9999999))
+        pool.close()
+        end = datetime.datetime.now()
+        elapsed = end-start
+        logger.debug('calculated picaso on all voxels in {} minutes'.format(elapsed.min))
+    except KeyboardInterrupt:
+        logger.info('picaso did not successfully complete for all voxels, exiting.')
+        pool.terminate()
+        pool.join()
+        sys.exit(1)
 
-    disturb_per[voxel] = f_coef[1]*f_coef[3]
-    disturb_par[voxel] = f_coef[0]*f_coef[2]
-    diff_per[voxel] = f_coef[3]
-    diff_per[voxel] = f_coef[2]
-    logger.debug('fit {}/{} voxels'.format(i+1, n_voxels))
 
-import IPython; IPython.embed()
+    # distribute outputs to output arrays
+    for i, voxel in enumerate(idx):
+        f_coef = picaso_outputs[i][2]
+        disturb_per[voxel] = f_coef[1]*f_coef[3]
+        disturb_par[voxel] = f_coef[0]*f_coef[2]
+        diff_per[voxel] = f_coef[3]
+        diff_par[voxel] = f_coef[2]
+
+    # output data has 4 3D volumes: (disturb_per, disturb_par, diff_per, diff_par)
+    output_data = np.hstack((disturb_per, disturb_par, diff_per, diff_par))
+    dmri.write(output_data, outputname)
+
+if __name__ == "__main__":
+
+    logger.setLevel(logging.DEBUG)
+    filename = '/archive/data/SPINS/pipelines/dtiprep/SPN01_CMH_0114_01/SPN01_CMH_0114_01_01_DTI60-1000_15_Ax-DTI-60plus5-20iso_QCed.nii.gz'
+    maskname =  '/archive/data/SPINS/pipelines/dtiprep/SPN01_CMH_0114_01/SPN01_CMH_0114_01_01_DTI60-1000_15_Ax-DTI-60plus5-20iso_QCed_B0_threshold_masked.nii.gz'
+    outputname = 'picaso.nii.gz'
+
+    main(filename, maskname, outputname)
 
