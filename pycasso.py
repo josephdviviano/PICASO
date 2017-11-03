@@ -20,34 +20,26 @@ class DiffusionData:
     """Contains the various attributes of the input diffusion data"""
     def __init__(self, filename, maskname, normalize=True):
 
-        self.filename = filename
-        self.maskname = maskname
-
-        # images
-        self.data = None
-        self.mask = None
-        self.clipmask = None
-
-        # metadata
-        self.header = None
-        self.affine = None
-        self.gradients = None
-        self.b = None
-        self.x = None
-        self.y = None
-        self.z = None
-        self.n = None
-
-        # masks
-        self.idx_b0 = None
-
-        # state variables
-        self.filetype = None
-        self.normalized = False
-        self.clipped = False
+        self.filename = filename # inputs
+        self.maskname = maskname #
+        self.data = None         # images
+        self.mask = None         #
+        self.clipmask = None     #
+        self.header = None       # metadata
+        self.affine = None       #
+        self.gradients = None    #
+        self.b = None            #
+        self.x = None            #
+        self.y = None            #
+        self.z = None            #
+        self.n = None            #
+        self.idx_b0 = None       #
+        self.filetype = None     # state variables
+        self.normalized = False  #
+        self.clipped = False     #
 
         # returns gradients, index of b0 volumes, index of mask,
-        # data and mask in x,y,z,n orientation,
+        # data and mask in x,y,z,n orientation
         if self._is_nrrd():
             self._import_nrrd()
         else:
@@ -55,11 +47,10 @@ class DiffusionData:
 
         self.data = self.data.astype(np.float)
 
-        # normalizes data and removes impossible values (all data 0 < x < 1)
-        # these impossible values typically caused by noise in the B0 image
         if normalize:
-            self._normalize()
-            self._clip()
+            self._normalize() # divide all directions by b0
+            self._clip()      # remove impossible vales (all data 0 < x < 1)
+
 
     def _is_nrrd(self):
         if '.nrrd' in os.path.splitext(self.filename)[1]:
@@ -345,18 +336,17 @@ def main(filename, maskname, outputname):
     try:
         logger.debug('beginning picaso estimation on all voxels')
         start = datetime.datetime.now()
-        #picaso_outputs = np.array(pool.map(picaso, arglist))
+        # http://xcodest.me/interrupt-the-python-multiprocessing-pool-in-graceful-way.html
+        # https://stackoverflow.com/questions/35908987/python-multiprocessing-map-vs-map-async
         picaso_outputs = np.array(pool.map_async(picaso, arglist).get(9999999))
         pool.close()
         end = datetime.datetime.now()
         elapsed = end-start
-        logger.debug('calculated picaso on all voxels in {} minutes'.format(elapsed.min))
+        logger.debug('calculated picaso on all voxels in {} minutes'.format(elapsed.total_seconds()/60.0))
     except KeyboardInterrupt:
-        logger.info('picaso did not successfully complete for all voxels, exiting.')
         pool.terminate()
         pool.join()
         sys.exit(1)
-
 
     # distribute outputs to output arrays
     for i, voxel in enumerate(idx):
@@ -369,6 +359,7 @@ def main(filename, maskname, outputname):
     # output data has 4 3D volumes: (disturb_per, disturb_par, diff_per, diff_par)
     output_data = np.hstack((disturb_per, disturb_par, diff_per, diff_par))
     dmri.write(output_data, outputname)
+
 
 if __name__ == "__main__":
 
