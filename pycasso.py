@@ -364,9 +364,9 @@ def main(filename, maskname, outputname):
 if __name__ == "__main__":
 
     logger.setLevel(logging.DEBUG)
-    filename = '/archive/data/SPINS/pipelines/dtiprep/SPN01_CMH_0114_01/SPN01_CMH_0114_01_01_DTI60-1000_15_Ax-DTI-60plus5-20iso_QCed.nii.gz'
-    maskname =  '/archive/data/SPINS/pipelines/dtiprep/SPN01_CMH_0114_01/SPN01_CMH_0114_01_01_DTI60-1000_15_Ax-DTI-60plus5-20iso_QCed_B0_threshold_masked.nii.gz'
-    outputname = 'picaso.nii.gz'
+    filename = 'test/input.nii.gz'
+    maskname =  'test/mask.nii.gz'
+    outputname = 'test/output.nii.gz'
 
     main(filename, maskname, outputname)
 
