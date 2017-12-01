@@ -1,4 +1,12 @@
 #!/usr/bin/env python
+"""
+an experimental python implementation of the picaso algorithm. expects a multi-
+shell diffusion-weighted image and mask as input. this implementation will
+automatically use all CPU cores available on your system.
+
+outputs a 4D image file (.nii.gz or .nrrd) with the following sub-bricks:
+[disturb_per, disturb_par, diff_per, diff_par].
+"""
 
 import os, sys
 import datetime
@@ -112,9 +120,9 @@ class DiffusionData:
 
         # import gradients and bvals, assume only name difference is extension
         if self.filename.endswith('nii.gz'):
-            stem = os.path.splitext(os.path.splitext(filename)[0])[0]
+            stem = os.path.splitext(os.path.splitext(self.filename)[0])[0]
         else:
-            stem = os.path.splitext(filename)[0]
+            stem = os.path.splitext(self.filename)[0]
 
         self.gradients = np.genfromtxt('{}.bvec'.format(stem))
         self.b = np.genfromtxt('{}.bval'.format(stem)) / 1000 # not clear why we divide
@@ -363,10 +371,19 @@ def main(filename, maskname, outputname):
 
 if __name__ == "__main__":
 
-    logger.setLevel(logging.DEBUG)
-    filename = 'test/input.nii.gz'
-    maskname =  'test/mask.nii.gz'
-    outputname = 'test/output.nii.gz'
+    argparser = argparse.ArgumentParser(description=__doc__)
+    argparser.add_argument('dwi', help='diffusion-weighted image (multi-shell)')
+    argparser.add_argument('mask', help='mask files (same dimensions as dwi)')
+    argparser.add_argument('output', help='output filename')
+    argparser.add_argument('-v', '--verbose', action='count', help='turns on debug messages')
+    args = argparser.parse_args()
 
-    main(filename, maskname, outputname)
+    # set debugging
+    logger.info('starting')
+    if args.verbose:
+        logger.setLevel(logging.DEBUG)
+    else:
+        logger.setLevel(logging.INFO)
+
+    main(args.dwi, args.mask, args.output)
 
